@@ -34,16 +34,35 @@ Findings from reading the source directly:
   rule has one `Outbound` target from a closed enum: `proxy | direct | direct_with_fragment |
   block`. There is no per-rule "which named group" concept — a rule can only send traffic to
   proxy/direct/block, not to "the WeChat group" specifically.
-  → To reproduce Mihomo Party's per-app proxy-group routing (e.g. "WeChat domains use the
-  WeChat group, not whatever the main group is set to"), we need either:
-    (a) extend the generated config schema so `Rule.outbound` can reference a named outbound
-        group tag (requires touching the protobuf schema + hiddify-core, the Go backend), or
-    (b) emulate it at the sing-box config-generation layer by writing a custom JSON template
-        with multiple `selector` outbounds and per-domain routing rules that target them by
-        tag — bypassing Hiddify's rule builder UI for this part and injecting a hand-written
-        sing-box rule block, similar in spirit to a Mihomo Party override script.
-  Option (b) is much lower risk and matches how Mihomo Party overrides already work
-  conceptually (JS override → generated config), so it's the recommended starting point.
+  → **RESOLVED (see `whyhea1/hiddify-core#feat/named-groups-and-rules`).** Earlier drafts of
+  this doc proposed emulating this at the config-generation layer via a hand-written sing-box
+  rule block (a Clash-style "override script" workaround), based on an incorrect assumption
+  that `clash2singbox` could bridge Clash `rules:`/`rule-providers:` YAML into sing-box rules.
+  It cannot — `clash2singbox`'s `Clash` struct only parses `proxies`/`proxy-groups`, no rules
+  at all. The actual fix implemented instead is native, in `hiddify-core` itself:
+    - `v2/config/route_rule.proto`: added a `ProxyGroup` message (`tag`, `name`,
+      `outbound_tags`, `outbound_tag_keywords`, `url_test`) and a `group` value on the
+      `Outbound` enum plus a companion `outbound_group_tag` string field on `Rule`.
+    - `v2/config/hiddify_option.go`: `HiddifyOptions` gained a `ProxyGroups []ProxyGroup`
+      field (JSON key `proxy-groups`), sitting alongside the existing `Rules []Rule`.
+    - `v2/config/rules.go`: revived the previously dead-code `Rule.MakeRule` /
+      `Rule.MakeDNSRule` / `Rule.IsValid`, rewritten against the real (richer than assumed)
+      `Rule` schema — structured domain/suffix/keyword/regex/geosite, ip/source-ip CIDR incl.
+      `geoip:` prefix, port/source-port incl. ranges, network + protocol enums, package/process
+      name/path, rule-sets. Added `buildNamedProxyGroups`/`matchGroupMembers`, which turn
+      `ProxyGroup` definitions into sing-box `selector` (+ optional `url-test`) outbounds by
+      exact tag or case-insensitive keyword match against the subscription's real outbound
+      tags.
+    - `v2/config/config.go`: `setOutbounds` now appends the generated group selectors
+      alongside the main selector/url-test outbounds; `setRoutingOptions`'s previously
+      commented-out `opt.Rules` loop is revived and extended with a `group` case that routes
+      to `GroupOutboundTag(rule.OutboundGroupTag)`, with a matching DNS-rule branch so
+      fake-DNS/remote-DNS resolution stays consistent with proxy/group routing.
+  This is lower risk than it first looked (self-contained within `hiddify-core`'s Go config
+  layer, no core routing-engine changes) and gives named groups a first-class place in the
+  schema instead of a bolt-on override layer — the Dart UI's route-rule editor and a future
+  proxy-group editor can both target it directly once wired up (see Phase 3/4 below, now a Dart
+  UI + wiring task rather than a Go engineering task).
 - **Profile parser** (`lib/features/profile/data/profile_parser.dart`) already handles `ss://`,
   `ssconf://`, and other standard subscription link formats, and the project README lists
   Clash / Clash Meta / V2Ray / sing-box subscription formats as supported. The existing
